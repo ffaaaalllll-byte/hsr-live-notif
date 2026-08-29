@@ -2,11 +2,19 @@ name: Check Honkai Star Rail Live Status
 
 on:
   schedule:
+    # Every 15 minutes. Keep this at 15+ minutes to stay within YouTube's
+    # free daily API quota (see README).
     - cron: '*/15 * * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      test_notification:
+        description: 'Send a sample Discord message instead of checking real live status'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: write # needed so the workflow can commit the updated state.json
 
 jobs:
   check-live:
@@ -26,6 +34,7 @@ jobs:
           YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
+          TEST_NOTIFICATION: ${{ inputs.test_notification }}
         run: node check.js
 
       - name: Commit updated state (if changed)
