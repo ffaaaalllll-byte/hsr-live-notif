@@ -69,7 +69,23 @@ async function notifyDiscord(video) {
   }
 }
 
-async function main() {
+async function main() {  // Test mode: send a sample notification straight to Discord so you can see
+  // exactly what it looks like, without waiting for a real stream or needing
+  // YouTube credentials at all. Triggered via the "Send test notification"
+  // checkbox when manually running the workflow.
+  if (process.env.TEST_NOTIFICATION === 'true') {
+    if (!process.env.DISCORD_WEBHOOK_URL) {
+      throw new Error('Missing required environment variable: DISCORD_WEBHOOK_URL');
+    }
+    console.log('TEST_NOTIFICATION is set. Sending a sample message (real live-check is skipped, state.json is untouched).');
+    await notifyDiscord({
+      videoId: 'dQw4w9WgXcQ',
+      title: '[TEST] Sample Special Program Title',
+      channelTitle: 'Honkai: Star Rail',
+    });
+    console.log('Test notification sent.');
+    return;
+  }
   const missing = ['YOUTUBE_API_KEY', 'YOUTUBE_CHANNEL_ID', 'DISCORD_WEBHOOK_URL']
     .filter((name) => !process.env[name]);
   if (missing.length > 0) {
