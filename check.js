@@ -11,6 +11,8 @@ const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const CHANNEL_ID = process.env.YOUTUBE_CHANNEL_ID;
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const DISCORD_USER_ID = process.env.DISCORD_USER_ID; // optional: pings you directly
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN; // optional
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID; // optional
 
 const STATE_FILE = path.join(__dirname, 'state.json');
 
@@ -66,6 +68,44 @@ async function notifyDiscord(video) {
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Discord webhook error ${res.status}: ${text}`);
+  }
+}
+
+// Sends a message via Telegram. Does nothing if Telegram isn't configured,
+// so it's entirely optional on top of Discord.
+async function notifyTelegram(text) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: TELEGRAM_CHAT_ID,
+      text,
+      parse_mode: 'Markdown',
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Telegram API error ${res.status}: ${errText}`);
+  }
+}
+
+// Sends the "channel is live" alert to every configured platform. Discord
+// failures are treated as real errors (it's the required channel); Telegram
+// failures are only logged, since it's optional.
+async function notifyLive(video) {
+  await notifyDiscord(video);
+  try {
+    await notifyTelegram(
+      `\u{1F534} *${video.channelTitle}* is LIVE now!\n` +
+        `*${video.title}*\n` +
+        `https://www.youtube.com/watch?v=${video.videoId}`
+    );
+  } catch (err) {
+    console.warn(`Telegram notification failed: ${err.message}`);
   }
 }
 
@@ -144,6 +184,19 @@ async function notifyDiscordCode(entry) {
   }
 }
 
+async function notifyCode(entry) {
+  await notifyDiscordCode(entry);
+  try {
+    await notifyTelegram(
+      `\u{1F381} New Honkai: Star Rail code: *${entry.code}*\n` +
+        `Reward: ${entry.reward}\n` +
+        `Redeem: https://hsr.hoyoverse.com/gift?code=${entry.code}`
+    );
+  } catch (err) {
+    console.warn(`Telegram notification failed: ${err.message}`);
+  }
+}
+
 async function checkForNewCodes(state) {
   const current = await findCurrentCodes();
 
@@ -170,7 +223,7 @@ async function checkForNewCodes(state) {
   if (newEntries.length > 0) {
     console.log(`Found ${newEntries.length} new code(s): ${newEntries.map((e) => e.code).join(', ')}`);
     for (const entry of newEntries) {
-      await notifyDiscordCode(entry);
+      await notifyCode(entry);
     }
     state.knownCodes = [...knownSet, ...newEntries.map((e) => e.code)];
     saveState(state);
@@ -189,7 +242,7 @@ async function main() {
       throw new Error('Missing required environment variable: DISCORD_WEBHOOK_URL');
     }
     console.log('TEST_NOTIFICATION is set. Sending a sample message (real live-check is skipped, state.json is untouched).');
-    await notifyDiscord({
+    await notifyLive({
       videoId: 'dQw4w9WgXcQ',
       title: '[TEST] Sample Special Program Title',
       channelTitle: 'Honkai: Star Rail',
@@ -209,8 +262,8 @@ async function main() {
 
   if (live) {
     if (state.lastNotifiedVideoId !== live.videoId) {
-      console.log(`Channel is live: "${live.title}" (${live.videoId}). Notifying Discord.`);
-      await notifyDiscord(live);
+      console.log(`Channel is live: "${live.title}" (${live.videoId}). Sending notifications.`);
+      await notifyLive(live);
       state.lastNotifiedVideoId = live.videoId;
       saveState(state);
     } else {
