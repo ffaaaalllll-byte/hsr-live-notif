@@ -69,7 +69,118 @@ async function notifyDiscord(video) {
   }
 }
 
-async function main() {  // Test mode: send a sample notification straight to Discord so you can see
+// Pages that compile current Honkai: Star Rail redemption codes as plain
+// text (usually updated within minutes of a livestream). You can add more
+// URLs to this array for redundancy if you find other reliable sources.
+const CODE_TRACKER_URLS = ['https://www.pockettactics.com/honkai-star-rail/codes'];
+
+function stripHtml(html) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, '\n')
+    .replace(/&amp;/g, '&')
+    .replace(/&#0?39;/g, "'")
+    .replace(/&quot;/g, '"');
+}
+
+// Looks for lines shaped like "CODE - reward description", which is how
+// these tracker pages format each redemption code. This is a best-effort
+// heuristic tied to how the page currently looks; if the site changes its
+// layout, this will simply find 0 codes rather than error out.
+function extractCodesFromText(text) {
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const found = new Map();
+
+  for (const line of lines) {
+    const match = line.match(/^([A-Z][A-Z0-9]{3,19})\s*[-\u2013]\s*(.{5,150})$/);
+    if (match) {
+      const [, code, reward] = match;
+      if (/stellar jade|credit|traveler|aether|guide|fuel/i.test(reward)) {
+        found.set(code, reward.trim());
+      }
+    }
+  }
+  return [...found.entries()].map(([code, reward]) => ({ code, reward }));
+}
+
+async function findCurrentCodes() {
+  const all = new Map();
+  for (const url of CODE_TRACKER_URLS) {
+    try {
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; HSR-Live-Notifier/1.0)' },
+      });
+      if (!res.ok) {
+        console.warn(`Could not fetch ${url}: ${res.status}`);
+        continue;
+      }
+      const html = await res.text();
+      const entries = extractCodesFromText(stripHtml(html));
+      entries.forEach(({ code, reward }) => all.set(code, reward));
+    } catch (err) {
+      console.warn(`Error checking ${url}: ${err.message}`);
+    }
+  }
+  return [...all.entries()].map(([code, reward]) => ({ code, reward }));
+}
+
+async function notifyDiscordCode(entry) {
+  const mention = DISCORD_USER_ID ? `<@${DISCORD_USER_ID}> ` : '';
+  const content =
+    `${mention}\u{1F381} New Honkai: Star Rail code: **${entry.code}**\n` +
+    `Reward: ${entry.reward}\n` +
+    `Redeem: https://hsr.hoyoverse.com/gift?code=${entry.code}`;
+
+  const res = await fetch(DISCORD_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Discord webhook error ${res.status}: ${text}`);
+  }
+}
+
+async function checkForNewCodes(state) {
+  const current = await findCurrentCodes();
+
+  if (current.length === 0) {
+    console.log('Code tracker: no codes matched on the page right now.');
+    return;
+  }
+
+  const known = state.knownCodes || [];
+
+  // First time this has ever run: record everything already on the page as
+  // "known" without notifying, so you don't get flooded with old codes.
+  if (!state.codesSeeded) {
+    console.log(`Seeding known code list with ${current.length} existing code(s). No notifications sent for these.`);
+    state.knownCodes = current.map((c) => c.code);
+    state.codesSeeded = true;
+    saveState(state);
+    return;
+  }
+
+  const knownSet = new Set(known);
+  const newEntries = current.filter((c) => !knownSet.has(c.code));
+
+  if (newEntries.length > 0) {
+    console.log(`Found ${newEntries.length} new code(s): ${newEntries.map((e) => e.code).join(', ')}`);
+    for (const entry of newEntries) {
+      await notifyDiscordCode(entry);
+    }
+    state.knownCodes = [...knownSet, ...newEntries.map((e) => e.code)];
+    saveState(state);
+  } else {
+    console.log('No new redemption codes found.');
+  }
+}
+
+async function main() {
+  // Test mode: send a sample notification straight to Discord so you can see
   // exactly what it looks like, without waiting for a real stream or needing
   // YouTube credentials at all. Triggered via the "Send test notification"
   // checkbox when manually running the workflow.
@@ -86,6 +197,7 @@ async function main() {  // Test mode: send a sample notification straight to Di
     console.log('Test notification sent.');
     return;
   }
+
   const missing = ['YOUTUBE_API_KEY', 'YOUTUBE_CHANNEL_ID', 'DISCORD_WEBHOOK_URL']
     .filter((name) => !process.env[name]);
   if (missing.length > 0) {
@@ -110,6 +222,14 @@ async function main() {  // Test mode: send a sample notification straight to Di
     saveState(state);
   } else {
     console.log('Channel is not currently live.');
+  }
+
+  try {
+    await checkForNewCodes(state);
+  } catch (err) {
+    // Don't let a code-tracker hiccup fail the whole run (the live-check
+    // above already succeeded and matters more).
+    console.warn(`Code check failed this round: ${err.message}`);
   }
 }
 
