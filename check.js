@@ -28,11 +28,30 @@ function saveState(state) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2) + '\n');
 }
 
+// The old approach used YouTube's search.list endpoint, which costs 100
+// quota units per call (only ~100 checks/day on the free tier). This
+// version instead reads the channel's free RSS feed (0 quota cost) to find
+// its most recent uploads, then spends just 1 quota unit checking whether
+// any of those are currently live. That's a ~100x quota saving, so even
+// frequent manual test runs won't come close to the daily limit.
+async function getRecentVideoIds() {
+  const url = `https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`YouTube RSS feed error ${res.status}`);
+  }
+  const xml = await res.text();
+  return [...xml.matchAll(/<yt:videoId>([\w-]+)<\/yt:videoId>/g)].map((m) => m[1]);
+}
+
 async function getLiveVideo() {
+  const recentIds = await getRecentVideoIds();
+  const candidates = recentIds.slice(0, 3); // the newest few are enough
+  if (candidates.length === 0) return null;
+
   const url =
-    `https://www.googleapis.com/youtube/v3/search` +
-    `?part=snippet&channelId=${CHANNEL_ID}&eventType=live&type=video` +
-    `&key=${YOUTUBE_API_KEY}`;
+    `https://www.googleapis.com/youtube/v3/videos` +
+    `?part=snippet&id=${candidates.join(',')}&key=${YOUTUBE_API_KEY}`;
 
   const res = await fetch(url);
   if (!res.ok) {
@@ -41,12 +60,15 @@ async function getLiveVideo() {
   }
   const data = await res.json();
 
-  if (data.items && data.items.length > 0) {
-    const item = data.items[0];
+  const liveItem = (data.items || []).find(
+    (item) => item.snippet.liveBroadcastContent === 'live'
+  );
+
+  if (liveItem) {
     return {
-      videoId: item.id.videoId,
-      title: item.snippet.title,
-      channelTitle: item.snippet.channelTitle,
+      videoId: liveItem.id,
+      title: liveItem.snippet.title,
+      channelTitle: liveItem.snippet.channelTitle,
     };
   }
   return null;
