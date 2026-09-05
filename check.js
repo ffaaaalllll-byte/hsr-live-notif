@@ -28,25 +28,36 @@ function saveState(state) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2) + '\n');
 }
 
-// The old approach used YouTube's search.list endpoint, which costs 100
-// quota units per call (only ~100 checks/day on the free tier). This
-// version instead reads the channel's free RSS feed (0 quota cost) to find
-// its most recent uploads, then spends just 1 quota unit checking whether
-// any of those are currently live. That's a ~100x quota saving, so even
-// frequent manual test runs won't come close to the daily limit.
+// Every channel has an "uploads" playlist whose ID is derived by swapping
+// the "UC" prefix of the channel ID for "UU" - a well-known YouTube
+// convention. This lets us skip an extra API call just to look it up.
+function getUploadsPlaylistId(channelId) {
+  return channelId.replace(/^UC/, 'UU');
+}
+
+// We previously tried YouTube's public RSS feed here (0 quota cost), but
+// that endpoint has become unreliable - it's been widely reported to
+// intermittently 404 even for valid, active channels. playlistItems.list is
+// an official, stable API endpoint that costs only 1 quota unit per call,
+// so we use that instead: still ~100x cheaper than the original search.list
+// approach (100 units), but without relying on a flaky free endpoint.
 async function getRecentVideoIds() {
-  const url = `https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`;
+  const playlistId = getUploadsPlaylistId(CHANNEL_ID);
+  const url =
+    `https://www.googleapis.com/youtube/v3/playlistItems` +
+    `?part=contentDetails&playlistId=${playlistId}&maxResults=3&key=${YOUTUBE_API_KEY}`;
+
   const res = await fetch(url);
   if (!res.ok) {
-    throw new Error(`YouTube RSS feed error ${res.status}`);
+    const text = await res.text();
+    throw new Error(`YouTube API error ${res.status}: ${text}`);
   }
-  const xml = await res.text();
-  return [...xml.matchAll(/<yt:videoId>([\w-]+)<\/yt:videoId>/g)].map((m) => m[1]);
+  const data = await res.json();
+  return (data.items || []).map((item) => item.contentDetails.videoId);
 }
 
 async function getLiveVideo() {
-  const recentIds = await getRecentVideoIds();
-  const candidates = recentIds.slice(0, 3); // the newest few are enough
+  const candidates = await getRecentVideoIds();
   if (candidates.length === 0) return null;
 
   const url =
